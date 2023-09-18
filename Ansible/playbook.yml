@@ -1,0 +1,151 @@
+# INSTALLATION D'UN CLUSTER KUBERNETES SUR UNE INFRASCTRUCTURE AWS
+
+- name: Installation des noeuds masters et workers
+
+  gather_facts: true
+  become: true
+  hosts: NodeType_master, NodeType_worker
+  remote_user: ubuntu
+
+  tasks :
+
+  # Mise à jour et installation des paquets nécessaires à l'installation de kubernetes
+  - name : Mise à jour des paquets     
+    apt : 
+      update_cache: yes
+
+  - name : Installation des paquets nécessaires à l'installation de kubernetes     
+    apt : 
+      name: "{{ item }}"
+      state: present
+    loop : 
+      - apt-transport-https
+      - curl
+      - software-properties-common
+
+  # Installation de docker
+  - name: Ajouter la clé GPG officielle de Docker
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Ajouter le dépôt docker dans les sources
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable
+      state: present
+
+  - name: Installation de docker et de ses dépendances
+    apt:
+      update_cache: yes
+      name: "{{ item }}"
+      state: latest     
+    loop:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+
+  # Installation de kubernetes
+  - name: Ajouter la clé GPG officielle de Kubernetes
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Ajouter le dépôt Kubernetes dans les sources
+    apt_repository:
+      repo: deb http://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+
+  - name: Installation de kubernetes, kubelet et kubeadm
+    apt:
+      update_cache: yes
+      name: "{{ item }}"
+      state: latest   
+    loop:     
+      - kubeadm
+      - kubectl
+      - kubelet
+      - kubernetes-cni 
+
+  - name: disable swap
+    shell: |
+            sudo swapoff -a
+            sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab 
+
+  - name: Redemarrer le service docker
+    command: systemctl restart docker
+
+  - name: Supprimer le fichier de configuration de containerd
+    command: rm -f /etc/containerd/config.toml
+
+  - name: Rédemarrer le service containerd
+    command: systemctl restart containerd
+
+
+# Initialisation du cluster sur le noeud master
+
+- name: Initialisation du cluster sur le noeud master
+
+  gather_facts: true
+  become: true
+  hosts: NodeType_master
+  remote_user: ubuntu
+
+  tasks :
+
+  - name: Initialiser le cluster
+    command: kubeadm init --pod-network-cidr=10.200.0.0/16
+
+  - name: Créer le dossier .kube
+    file:
+      path: $HOME/.kube
+      state: directory
+      mode: 0755
+
+  - name: Copier le fichier de configuration du cluster dans le dossier .kube
+    copy:
+      src: /etc/kubernetes/admin.conf
+      dest: $HOME/.kube/config
+      remote_src: yes
+
+  - name: Installer le réseau de pod
+    command: kubectl apply -f https://docs.projectcalico.org/v3.8/manifests/calico.yaml
+    args: 
+      chdir: $HOME
+
+  - name: Récupérer le token pour join les workers
+    shell: |
+            kubeadm token create --print-join-command
+    register: join_command
+
+  - debug: 
+    msg: "{{ join_command.stdout_lines }}"
+
+  - name: Copie de la commande de join dans un fichier local
+    copy:
+      content: "{{ join_command.stdout_lines[0] }}"
+      dest: /tmp/kubernetes_join_command
+      mode: 0777
+
+
+# Join des noeuds workers au cluster
+
+- name: Join des noeuds workers au cluster
+
+  gather_facts: true
+  become: true
+  hosts: NodeType_worker
+  remote_user: ubuntu
+
+  tasks :
+
+  - name: Copie de la commande de join sur les workers
+    copy:
+      src: /tmp/kubernetes_join_command
+      dest: /tmp/kubernetes_join_command
+      mode: 0777
+
+  - name: Join des noeuds workers au cluster
+    command: sh /tmp/kubernetes_join_command
+    register: join_or_not
+
+
